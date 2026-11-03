@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000000">
+  <title>Pong</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      background: #000;
+      color: #fff;
+      font-family: "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      min-height: 100svh;
+    }
+
+    main {
+      display: grid;
+      place-items: center;
+      width: 100%;
+      height: 100%;
+    }
+
+    canvas {
+      display: block;
+      width: min(92vw, 92vh, 720px);
+      height: min(92vw, 92vh, 720px);
+      background: #000;
+      image-rendering: pixelated;
+    }
+
+    #check-results {
+      width: min(92vw, 42rem);
+      max-height: 92vh;
+      overflow: auto;
+      color: #fff;
+      font: 1rem/1.5 monospace;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <canvas id="game" width="600" height="600" aria-label="Pong game board"></canvas>
+    <pre id="check-results" hidden></pre>
+  </main>
+  <script>
+    (() => {
+      const SIZE = 600;
+      const PADDLE_WIDTH = 12;
+      const PADDLE_HEIGHT = 84;
+      const BALL_SIZE = 12;
+      const PLAYER_X = 40;
+      const CPU_X = SIZE - 40 - PADDLE_WIDTH;
+      const TOP = 44;
+      const BOTTOM = SIZE - 44;
+      const PLAYER_SPEED = 390;
+      const CPU_SPEED = 245;
+      const SERVE_DELAY = 1;
+      const WIN_SCORE = 10;
+      const INITIAL_BALL_SPEED = 300;
+      const MAX_BALL_SPEED = 510;
+      const BALL_ACCELERATION = 1.035;
+      const MAX_STEP = 1 / 30;
+
+      const canvas = document.querySelector("#game");
+      const context = canvas.getContext("2d");
+      const results = document.querySelector("#check-results");
+
+      function createGame() {
+        return {
+          playerY: SIZE / 2 - PADDLE_HEIGHT / 2,
+          cpuY: SIZE / 2 - PADDLE_HEIGHT / 2,
+          ballX: SIZE / 2 - BALL_SIZE / 2,
+          ballY: SIZE / 2 - BALL_SIZE / 2,
+          velocityX: 0,
+          velocityY: 0,
+          speed: INITIAL_BALL_SPEED,
+          playerScore: 0,
+          cpuScore: 0,
+          phase: "ready",
+          serveTimer: 0,
+          serveDirection: 1,
+          playerDirection: 0,
+          cpuAimOffset: 0,
+          cpuAimTimer: 0,
+          message: "PRESS SPACE TO START"
+        };
+      }
+
+      let game = createGame();
+
+      function clamp(value, minimum, maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
+      }
+
+      function movePaddle(y, direction, speed, delta) {
+        return clamp(y + direction * speed * delta, TOP, BOTTOM - PADDLE_HEIGHT);
+      }
+
+      function launchServe(state, direction) {
+        state.ballX = SIZE / 2 - BALL_SIZE / 2;
+        state.ballY = SIZE / 2 - BALL_SIZE / 2;
+        state.speed = INITIAL_BALL_SPEED;
+        state.serveDirection = direction;
+        state.serveTimer = SERVE_DELAY;
+        state.velocityX = 0;
+        state.velocityY = 0;
+        state.phase = "serving";
+        state.message = "";
+      }
+
+      function startOrRestart(state) {
+        if (state.phase === "ready" || state.phase === "gameover") {
+          const fresh = createGame();
+          Object.assign(state, fresh);
+          launchServe(state, 1);
+          return;
+        }
+      }
+
+      function togglePause(state) {
+        if (state.phase === "playing" || state.phase === "serving") {
+          state.phase = "paused";
+          state.message = "PAUSED  -  P TO RESUME";
+        } else if (state.phase === "paused") {
+          state.phase = state.serveTimer > 0 ? "serving" : "playing";
+          state.message = "";
+        }
+      }
+
+      function reflectBallFromPaddle(state, paddleY, direction) {
+        const paddleCenter = paddleY + PADDLE_HEIGHT / 2;
+        const ballCenter = state.ballY + BALL_SIZE / 2;
+        const impact = clamp((ballCenter - paddleCenter) / (PADDLE_HEIGHT / 2), -1, 1);
+        const angle = impact * 1.02;
+        state.speed = Math.min(state.speed * BALL_ACCELERATION, MAX_BALL_SPEED);
+        state.velocityX = Math.cos(angle) * state.speed * direction;
+        state.velocityY = Math.sin(angle) * state.speed;
+        state.ballX = direction > 0 ? PLAYER_X + PADDLE_WIDTH : CPU_X - BALL_SIZE;
+      }
+
+      function awardPoint(state, scorer) {
+        if (scorer === "player") {
+          state.playerScore += 1;
+        } else {
+          state.cpuScore += 1;
+        }
+
+        if (state.playerScore >= WIN_SCORE || state.cpuScore >= WIN_SCORE) {
+          state.phase = "gameover";
+          state.message = state.playerScore >= WIN_SCORE ? "YOU WIN  -  SPACE TO RESTART" : "CPU WINS  -  SPACE TO RESTART";
+          state.velocityX = 0;
+          state.velocityY = 0;
+          return;
+        }
+
+        launchServe(state, scorer === "player" ? 1 : -1);
+      }
+
+      function advanceCpu(state, delta) {
+        if (state.ballX < SIZE * 0.62 && state.velocityX < 0) {
+          const target = SIZE / 2 - PADDLE_HEIGHT / 2;
+          state.cpuY = movePaddle(state.cpuY, Math.sign(target - state.cpuY), CPU_SPEED * 0.55, delta);
+          return;
+        }
+
+        if (state.cpuAimTimer <= 0) {
+          state.cpuAimOffset = (Math.random() - 0.5) * PADDLE_HEIGHT * 0.8;
+          state.cpuAimTimer = 0.22 + Math.random() * 0.34;
+        }
+        state.cpuAimTimer -= delta;
+        const target = state.ballY + BALL_SIZE / 2 + state.cpuAimOffset - PADDLE_HEIGHT / 2;
+        state.cpuY = movePaddle(state.cpuY, Math.sign(target - state.cpuY), CPU_SPEED, delta);
+      }
+
+      function stepGame(state, delta) {
+        const elapsed = clamp(delta, 0, MAX_STEP);
+        if (state.phase !== "paused" && state.phase !== "gameover") {
+          state.playerY = movePaddle(state.playerY, state.playerDirection, PLAYER_SPEED, elapsed);
+        }
+
+        if (state.phase === "ready" || state.phase === "paused" || state.phase === "gameover") return;
+
+        if (state.phase === "serving") {
+          state.serveTimer -= elapsed;
+          if (state.serveTimer <= 0) {
+            const angle = (Math.random() - 0.5) * 0.46;
+            state.velocityX = Math.cos(angle) * state.speed * state.serveDirection;
+            state.velocityY = Math.sin(angle) * state.speed;
+            state.phase = "playing";
+          }
+          return;
+        }
+
+        advanceCpu(state, elapsed);
+        state.ballX += state.velocityX * elapsed;
+        state.ballY += state.velocityY * elapsed;
+
+        if (state.ballY <= TOP) {
+          state.ballY = TOP;
+          state.velocityY = Math.abs(state.velocityY);
+        } else if (state.ballY + BALL_SIZE >= BOTTOM) {
+          state.ballY = BOTTOM - BALL_SIZE;
+          state.velocityY = -Math.abs(state.velocityY);
+        }
+
+        const overlapsPlayer = state.ballY + BALL_SIZE >= state.playerY && state.ballY <= state.playerY + PADDLE_HEIGHT;
+        if (state.velocityX < 0 && state.ballX <= PLAYER_X + PADDLE_WIDTH && state.ballX + BALL_SIZE >= PLAYER_X && overlapsPlayer) {
+          reflectBallFromPaddle(state, state.playerY, 1);
+        }
+
+        const overlapsCpu = state.ballY + BALL_SIZE >= state.cpuY && state.ballY <= state.cpuY + PADDLE_HEIGHT;
+        if (state.velocityX > 0 && state.ballX + BALL_SIZE >= CPU_X && state.ballX <= CPU_X + PADDLE_WIDTH && overlapsCpu) {
+          reflectBallFromPaddle(state, state.cpuY, -1);
+        }
+
+        if (state.ballX + BALL_SIZE < 0) awardPoint(state, "cpu");
+        if (state.ballX > SIZE) awardPoint(state, "player");
+      }
+
+      function draw(state) {
+        context.fillStyle = "#000";
+        context.fillRect(0, 0, SIZE, SIZE);
+
+        context.fillStyle = "#fff";
+        context.fillRect(SIZE / 2 - 2, TOP, 4, BOTTOM - TOP);
+
+        context.setLineDash([13, 12]);
+        context.lineWidth = 4;
+        context.beginPath();
+        context.moveTo(0, TOP);
+        context.lineTo(SIZE, TOP);
+        context.moveTo(0, BOTTOM);
+        context.lineTo(SIZE, BOTTOM);
+        context.strokeStyle = "#fff";
+        context.stroke();
+        context.setLineDash([]);
+
+        context.fillRect(PLAYER_X, state.playerY, PADDLE_WIDTH, PADDLE_HEIGHT);
+        context.fillRect(CPU_X, state.cpuY, PADDLE_WIDTH, PADDLE_HEIGHT);
+        context.fillRect(state.ballX, state.ballY, BALL_SIZE, BALL_SIZE);
+
+        context.textAlign = "center";
+        context.textBaseline = "top";
+        context.font = "bold 68px monospace";
+        context.fillText(String(state.playerScore), SIZE * 0.25, 76);
+        context.fillText(String(state.cpuScore), SIZE * 0.75, 76);
+
+        const message = state.phase === "serving"
+          ? String(Math.max(1, Math.ceil(state.serveTimer)))
+          : state.message;
+        if (message) {
+          context.font = "bold 18px monospace";
+          context.textBaseline = "middle";
+          context.fillText(message, SIZE / 2, SIZE / 2);
+        }
+      }
+
+      function runChecks() {
+        const checks = [];
+        function check(name, assertion) {
+          assertion();
+          checks.push(`PASS ${name}`);
+        }
+        function equal(actual, expected, message) {
+          if (actual !== expected) throw new Error(`${message}: expected ${expected}, got ${actual}`);
+        }
+        function truthy(value, message) {
+          if (!value) throw new Error(message);
+        }
+
+        check("paddles stay inside the field", () => {
+          equal(movePaddle(TOP, -1, PLAYER_SPEED, 1), TOP, "top bound");
+          equal(movePaddle(BOTTOM - PADDLE_HEIGHT, 1, PLAYER_SPEED, 1), BOTTOM - PADDLE_HEIGHT, "bottom bound");
+        });
+
+        check("wall collision reverses vertical ball direction", () => {
+          const state = createGame();
+          state.phase = "playing";
+          state.ballY = TOP + 1;
+          state.velocityX = 0;
+          state.velocityY = -120;
+          stepGame(state, MAX_STEP);
+          truthy(state.velocityY > 0, "ball should rebound down from the top boundary");
+        });
+
+        check("paddle collision rebounds and uses impact position", () => {
+          const centered = createGame();
+          centered.phase = "playing";
+          centered.playerY = 200;
+          centered.ballX = PLAYER_X + PADDLE_WIDTH + 2;
+          centered.ballY = centered.playerY + PADDLE_HEIGHT / 2 - BALL_SIZE / 2;
+          centered.velocityX = -120;
+          stepGame(centered, MAX_STEP);
+          truthy(centered.velocityX > 0, "player paddle should reverse horizontal direction");
+          const edge = createGame();
+          edge.playerY = centered.playerY;
+          reflectBallFromPaddle(edge, edge.playerY, 1);
+          truthy(Math.abs(edge.velocityY) > Math.abs(centered.velocityY), "edge hit should produce a steeper angle than a centered hit");
+        });
+
+        check("paddle hits accelerate the ball up to its cap", () => {
+          const state = createGame();
+          for (let hit = 0; hit < 100; hit += 1) reflectBallFromPaddle(state, state.playerY, 1);
+          equal(state.speed, MAX_BALL_SPEED, "ball speed cap");
+        });
+
+        check("missed ball awards a point and starts a one-second serve", () => {
+          const state = createGame();
+          state.phase = "playing";
+          state.ballX = SIZE + 1;
+          state.velocityX = 200;
+          stepGame(state, MAX_STEP);
+          equal(state.playerScore, 1, "player score after CPU misses");
+          equal(state.phase, "serving", "phase after point");
+          equal(state.serveDirection, 1, "serve goes toward conceding CPU");
+          equal(state.serveTimer, SERVE_DELAY, "serve delay");
+        });
+
+        check("CPU movement is bounded by its maximum speed", () => {
+          const state = createGame();
+          state.phase = "playing";
+          state.ballX = SIZE / 2;
+          state.ballY = TOP;
+          const before = state.cpuY;
+          stepGame(state, MAX_STEP);
+          truthy(Math.abs(state.cpuY - before) <= CPU_SPEED * MAX_STEP + 0.001, "CPU moved faster than its limit");
+        });
+
+        check("pause and resume preserve the game", () => {
+          const state = createGame();
+          launchServe(state, 1);
+          togglePause(state);
+          equal(state.phase, "paused", "paused phase");
+          state.playerDirection = 1;
+          const pausedY = state.playerY;
+          stepGame(state, MAX_STEP);
+          equal(state.playerY, pausedY, "player paddle position while paused");
+          togglePause(state);
+          equal(state.phase, "serving", "resumed phase");
+        });
+
+        check("first to ten ends the match and restart clears the score", () => {
+          const state = createGame();
+          state.playerScore = WIN_SCORE - 1;
+          awardPoint(state, "player");
+          equal(state.phase, "gameover", "winning phase");
+          startOrRestart(state);
+          equal(state.playerScore, 0, "score after restart");
+          equal(state.phase, "serving", "phase after restart");
+        });
+
+        return checks;
+      }
+
+      if (new URLSearchParams(window.location.search).has("test")) {
+        canvas.hidden = true;
+        results.hidden = false;
+        try {
+          const checks = runChecks();
+          results.textContent = `${checks.join("\n")}\n\n${checks.length} gameplay checks passed.`;
+        } catch (error) {
+          results.textContent = `FAIL ${error.message}`;
+          results.style.color = "#f66";
+          throw error;
+        }
+        return;
+      }
+
+      const heldKeys = new Set();
+      window.addEventListener("keydown", (event) => {
+        const key = event.key.toLowerCase();
+        if (key === "arrowup" || key === "arrowdown" || key === " ") event.preventDefault();
+        if (event.repeat && (key === " " || key === "p")) return;
+        if (key === "arrowup") {
+          heldKeys.add(key);
+          game.playerDirection = heldKeys.has("arrowdown") ? 0 : -1;
+        } else if (key === "arrowdown") {
+          heldKeys.add(key);
+          game.playerDirection = heldKeys.has("arrowup") ? 0 : 1;
+        } else if (key === " ") {
+          startOrRestart(game);
+        } else if (key === "p") {
+          togglePause(game);
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        const key = event.key.toLowerCase();
+        heldKeys.delete(key);
+        if (key === "arrowup") game.playerDirection = heldKeys.has("arrowdown") ? 1 : 0;
+        if (key === "arrowdown") game.playerDirection = heldKeys.has("arrowup") ? -1 : 0;
+      });
+
+      window.addEventListener("blur", () => {
+        heldKeys.clear();
+        game.playerDirection = 0;
+      });
+
+      let lastFrame = null;
+      function frame(timestamp) {
+        const delta = lastFrame === null ? 0 : (timestamp - lastFrame) / 1000;
+        lastFrame = timestamp;
+        stepGame(game, delta);
+        draw(game);
+        window.requestAnimationFrame(frame);
+      }
+
+      draw(game);
+      window.requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
